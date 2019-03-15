@@ -11,7 +11,6 @@
     "node": ">=6.0"
   },
   "dependencies": {
-    "apollo-server-env": "file:../apollo-server-core",
     "apollo-server-env": "file:../apollo-server-env",
     "graphql-extensions": "file:../graphql-extensions"
   },

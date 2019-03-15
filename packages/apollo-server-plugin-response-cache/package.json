@@ -19,6 +19,7 @@
     "node": ">=6"
   },
   "dependencies": {
+    "apollo-cache-control": "file:../apollo-cache-control",
     "apollo-server-caching": "file:../apollo-server-caching",
     "apollo-server-plugin-base": "file:../apollo-server-plugin-base",
     "apollo-server-env": "file:../apollo-server-env"

@@ -7,7 +7,7 @@ import {
 } from 'apollo-server-plugin-base';
 import { KeyValueCache, PrefixingKeyValueCache } from 'apollo-server-caching';
 import { WithRequired, ValueOrPromise } from 'apollo-server-env';
-import { CacheScope } from 'apollo-server-core/dist/requestPipelineAPI';
+import { CacheScope } from 'apollo-cache-control';
 
 // XXX This should use createSHA from apollo-server-core in order to work on
 // non-Node environments. I'm not sure where that should end up ---

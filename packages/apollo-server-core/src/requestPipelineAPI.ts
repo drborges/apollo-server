@@ -83,8 +83,6 @@ export interface GraphQLRequestContext<TContext = Record<string, any>> {
 
   readonly metrics?: GraphQLRequestMetrics;
 
-  readonly overallCachePolicy?: Required<CacheHint> | undefined;
-
   debug?: boolean;
 }
 
