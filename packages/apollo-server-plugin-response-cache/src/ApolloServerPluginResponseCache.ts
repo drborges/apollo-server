@@ -132,20 +132,6 @@ export default function plugin(
       let sessionId: string | null = null;
       let baseCacheKey: BaseCacheKey | null = null;
 
-      async function cacheGet(
-        contextualCacheKeyFields: ContextualCacheKey,
-      ): Promise<ExecutionResult | null> {
-        const key = cacheKeyString({
-          ...baseCacheKey!,
-          ...contextualCacheKeyFields,
-        });
-        const value = await cache.get(key);
-        if (value === undefined) {
-          return null;
-        }
-        return JSON.parse(value);
-      }
-
       function cacheSetInBackground(
         contextualCacheKeyFields: ContextualCacheKey,
         response: ExecutionResult,
@@ -173,8 +159,25 @@ export default function plugin(
             'document' | 'operationName' | 'operation'
           >,
         ): Promise<ExecutionResult | null> {
+          requestContext.metrics!.responseCacheHit = false;
+
           if (!isGraphQLQuery(requestContext)) {
             return null;
+          }
+
+          async function cacheGet(
+            contextualCacheKeyFields: ContextualCacheKey,
+          ): Promise<ExecutionResult | null> {
+            const key = cacheKeyString({
+              ...baseCacheKey!,
+              ...contextualCacheKeyFields,
+            });
+            const value = await cache.get(key);
+            if (value === undefined) {
+              return null;
+            }
+            requestContext.metrics!.responseCacheHit = true;
+            return JSON.parse(value);
           }
 
           // Call hooks. Save values which will be used in XXX as well.
@@ -223,6 +226,10 @@ export default function plugin(
           requestContext: WithRequired<GraphQLRequestContext<any>, 'response'>,
         ) {
           if (!isGraphQLQuery(requestContext)) {
+            return;
+          }
+          if (requestContext.metrics!.responseCacheHit) {
+            // Never write back to the cache what we just read from it.
             return;
           }
           if (

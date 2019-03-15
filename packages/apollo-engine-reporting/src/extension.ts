@@ -275,7 +275,7 @@ export class EngineReportingExtension<TContext = any>
   }
 
   public willSendResponse(
-    _requestContext: WithRequired<GraphQLRequestContext<TContext>, 'response'>,
+    requestContext: WithRequired<GraphQLRequestContext<TContext>, 'response'>,
   ) {
     // XXX Is it safe to use willSendReponse to do this finalization, vs
     // something that's more explicitly part of a try/final in requestPipeline
@@ -284,6 +284,8 @@ export class EngineReportingExtension<TContext = any>
       process.hrtime(this.startHrTime),
     );
     this.trace.endTime = dateToTimestamp(new Date());
+
+    this.trace.fullQueryCacheHit = !!requestContext.metrics!.responseCacheHit;
 
     const operationName = this.operationName || '';
     let signature;
