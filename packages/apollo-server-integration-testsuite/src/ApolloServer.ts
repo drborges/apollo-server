@@ -40,6 +40,7 @@ import { Headers } from 'apollo-server-env';
 import { GraphQLExtension, GraphQLResponse } from 'graphql-extensions';
 import { TracingFormat } from 'apollo-tracing';
 import ApolloServerPluginResponseCache from 'apollo-server-plugin-response-cache';
+import { GraphQLRequestContext } from 'apollo-server-plugin-base';
 
 import { mockDate, unmockDate, advanceTimeBy } from '__mocks__/date';
 
@@ -1387,22 +1388,6 @@ export function testApolloServer<AS extends ApolloServerBase>(
     });
 
     describe('Response caching', () => {
-      const typeDefs = gql`
-        type Query {
-          cachedField: String @cacheControl(maxAge: 10)
-        }
-      `;
-
-      let resolverCallCount = 0;
-      const resolvers = {
-        Query: {
-          cachedField: () => {
-            resolverCallCount++;
-            return 'value';
-          },
-        },
-      };
-
       beforeAll(() => {
         mockDate();
       });
@@ -1412,14 +1397,88 @@ export function testApolloServer<AS extends ApolloServerBase>(
       });
 
       it('basic caching', async () => {
+        const typeDefs = gql`
+          type Query {
+            cached: String @cacheControl(maxAge: 10)
+            uncached: String
+            private: String @cacheControl(maxAge: 9, scope: PRIVATE)
+          }
+        `;
+
+        type FieldName = 'cached' | 'uncached' | 'private';
+        const fieldNames: FieldName[] = ['cached', 'uncached', 'private'];
+        const resolverCallCount: Partial<Record<FieldName, number>> = {};
+        const expectedResolverCallCount: Partial<
+          Record<FieldName, number>
+        > = {};
+        const expectCacheHit = (fn: FieldName) =>
+          expect(resolverCallCount[fn]).toBe(expectedResolverCallCount[fn]);
+        const expectCacheMiss = (fn: FieldName) =>
+          expect(resolverCallCount[fn]).toBe(++expectedResolverCallCount[fn]);
+
+        const resolvers = {
+          Query: {},
+        };
+        fieldNames.forEach(name => {
+          resolverCallCount[name] = 0;
+          expectedResolverCallCount[name] = 0;
+          resolvers.Query[name] = () => {
+            resolverCallCount[name]++;
+            return `value:${name}`;
+          };
+        });
+
         const { url: uri } = await createApolloServer({
           typeDefs,
           resolvers,
-          plugins: [ApolloServerPluginResponseCache()],
+          plugins: [
+            ApolloServerPluginResponseCache({
+              sessionId: (requestContext: GraphQLRequestContext<any>) => {
+                return (
+                  requestContext.request.http.headers.get('session-id') || null
+                );
+              },
+              extraCacheKeyData: (
+                requestContext: GraphQLRequestContext<any>,
+              ) => {
+                return (
+                  requestContext.request.http.headers.get(
+                    'extra-cache-key-data',
+                  ) || null
+                );
+              },
+              shouldReadFromCache: (
+                requestContext: GraphQLRequestContext<any>,
+              ) => {
+                return !requestContext.request.http.headers.get(
+                  'no-read-from-cache',
+                );
+              },
+              shouldWriteToCache: (
+                requestContext: GraphQLRequestContext<any>,
+              ) => {
+                return !requestContext.request.http.headers.get(
+                  'no-write-to-cache',
+                );
+              },
+            }),
+          ],
         });
 
         const apolloFetch = createApolloFetch({ uri });
-        // Make HTTP headers visible on the result next to 'data'.
+        apolloFetch.use(({ request, options }, next) => {
+          const headers = (request as any).headers;
+          if (headers) {
+            if (!options.headers) {
+              options.headers = {};
+            }
+            for (const k in headers) {
+              options.headers[k] = headers[k];
+            }
+          }
+          next();
+        });
+        // Make HTTP response headers visible on the result next to 'data'.
         apolloFetch.useAfter(({ response }, next) => {
           response.parsed.httpHeaders = response.headers;
           next();
@@ -1429,63 +1488,61 @@ export function testApolloServer<AS extends ApolloServerBase>(
           return (result.httpHeaders as Headers).get(header);
         }
 
-        let expectedResolverCalls = 0;
-        const expectCacheHit = () =>
-          expect(resolverCallCount).toBe(expectedResolverCalls);
-        const expectCacheMiss = () =>
-          expect(resolverCallCount).toBe(++expectedResolverCalls);
-
+        const basicQuery = '{ cached }';
         const fetch = async () => {
           const result = await apolloFetch({
-            query: `{ cachedField }`,
+            query: basicQuery,
           });
-          expect(result.data.cachedField).toBe('value');
+          expect(result.data.cached).toBe('value:cached');
           return result;
         };
 
+        // Cache miss
         {
           const result = await fetch();
-          expectCacheMiss();
+          expectCacheMiss('cached');
           expect(httpHeader(result, 'cache-control')).toBe(
             'max-age=10, public',
           );
           expect(httpHeader(result, 'age')).toBe(null);
         }
 
+        // Cache hit
         {
           const result = await fetch();
-          expectCacheHit();
+          expectCacheHit('cached');
           expect(httpHeader(result, 'cache-control')).toBe(
             'max-age=10, public',
           );
           expect(httpHeader(result, 'age')).toBe('0');
         }
 
+        // Cache hit partway to ttl.
         advanceTimeBy(5 * 1000);
-
         {
           const result = await fetch();
-          expectCacheHit();
+          expectCacheHit('cached');
           expect(httpHeader(result, 'cache-control')).toBe(
             'max-age=10, public',
           );
           expect(httpHeader(result, 'age')).toBe('5');
         }
 
+        // Cache miss after ttl.
         advanceTimeBy(6 * 1000);
-
         {
           const result = await fetch();
-          expectCacheMiss();
+          expectCacheMiss('cached');
           expect(httpHeader(result, 'cache-control')).toBe(
             'max-age=10, public',
           );
           expect(httpHeader(result, 'age')).toBe(null);
         }
 
+        // Cache hit.
         {
           const result = await fetch();
-          expectCacheHit();
+          expectCacheHit('cached');
           expect(httpHeader(result, 'cache-control')).toBe(
             'max-age=10, public',
           );
@@ -1494,17 +1551,107 @@ export function testApolloServer<AS extends ApolloServerBase>(
 
         // For now, caching is based on the original document text, not the AST,
         // so this should be a cache miss.
-        const textChangedASTUnchangedResult = await apolloFetch({
-          query: `{       cachedField           }`,
-        });
-        expect(textChangedASTUnchangedResult.data.cachedField).toBe('value');
-        expectCacheMiss();
+        {
+          const result = await apolloFetch({
+            query: '{       cached           }',
+          });
+          expect(result.data.cached).toBe('value:cached');
+          expectCacheMiss('cached');
+        }
 
-        const slightlyDifferentQueryResult = await apolloFetch({
-          query: `{alias: cachedField}`,
-        });
-        expect(slightlyDifferentQueryResult.data.alias).toBe('value');
-        expectCacheMiss();
+        // This definitely should be a cache miss because the output is different.
+        {
+          const result = await apolloFetch({
+            query: '{alias: cached}',
+          });
+          expect(result.data.alias).toBe('value:cached');
+          expectCacheMiss('cached');
+        }
+
+        // Reading both a cached and uncached data should not get cached (it's a
+        // full response cache).
+        {
+          const result = await apolloFetch({
+            query: '{cached uncached}',
+          });
+          expect(result.data.cached).toBe('value:cached');
+          expect(result.data.uncached).toBe('value:uncached');
+          expectCacheMiss('cached');
+          expectCacheMiss('uncached');
+          expect(httpHeader(result, 'cache-control')).toBe(null);
+          expect(httpHeader(result, 'age')).toBe(null);
+        }
+
+        // Just double-checking that it didn't get cached.
+        {
+          const result = await apolloFetch({
+            query: '{cached uncached}',
+          });
+          expect(result.data.cached).toBe('value:cached');
+          expect(result.data.uncached).toBe('value:uncached');
+          expectCacheMiss('cached');
+          expectCacheMiss('uncached');
+          expect(httpHeader(result, 'cache-control')).toBe(null);
+          expect(httpHeader(result, 'age')).toBe(null);
+        }
+
+        // Let's just remind ourselves that the basic query is cacheable.
+        {
+          await apolloFetch({ query: basicQuery });
+          expectCacheHit('cached');
+        }
+
+        // But if we give it some extra cache key data, it'll be cached separately.
+        {
+          const result = await apolloFetch({
+            query: basicQuery,
+            headers: { 'extra-cache-key-data': 'foo' },
+          } as any);
+          expect(result.data.cached).toBe('value:cached');
+          expectCacheMiss('cached');
+        }
+
+        // But if we give it the same extra cache key data twice, it's a hit.
+        {
+          const result = await apolloFetch({
+            query: basicQuery,
+            headers: { 'extra-cache-key-data': 'foo' },
+          } as any);
+          expect(result.data.cached).toBe('value:cached');
+          expectCacheHit('cached');
+        }
+
+        // Without a session ID, private fields won't be cached.
+        {
+          const result = await apolloFetch({
+            query: '{private}',
+          } as any);
+          expect(result.data.private).toBe('value:private');
+          expectCacheMiss('private');
+          // Note that the HTTP header calculator doesn't know about session
+          // IDs, so it'll still tell HTTP-level caches to cache this, albeit
+          // privately.
+          expect(httpHeader(result, 'cache-control')).toBe(
+            'max-age=9, private',
+          );
+          expect(httpHeader(result, 'age')).toBe(null);
+        }
+
+        // See?
+        {
+          const result = await apolloFetch({
+            query: '{private}',
+          } as any);
+          expect(result.data.private).toBe('value:private');
+          expectCacheMiss('private');
+          expect(httpHeader(result, 'cache-control')).toBe(
+            'max-age=9, private',
+          );
+        }
+
+        // XXX test actually setting sessionId
+        // XXX test shouldReadFromCache
+        // XXX test shouldWriteToCache
       });
     });
   });
