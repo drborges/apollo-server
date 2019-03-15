@@ -320,7 +320,17 @@ export async function processGraphQLRequest<TContext>(
     }
 
     if (cacheControlExtension) {
-      requestContext.overallCachePolicy = cacheControlExtension.computeOverallCachePolicy();
+      if (requestContext.overallCachePolicy) {
+        // If we read this response from a cache and it already has its own
+        // policy, teach that to cacheControlExtension so that it'll use the
+        // saved policy for HTTP headers. (If cacheControlExtension was a
+        // plugin, it could just read from the requestContext, but it isn't.)
+        cacheControlExtension.overrideOverallCachePolicy(
+          requestContext.overallCachePolicy,
+        );
+      } else {
+        requestContext.overallCachePolicy = cacheControlExtension.computeOverallCachePolicy();
+      }
     }
 
     const formattedExtensions = extensionStack.format();

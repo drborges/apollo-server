@@ -44,7 +44,8 @@ declare module 'graphql/type/definition' {
 
 declare module 'apollo-server-core/dist/requestPipelineAPI' {
   interface GraphQLRequestContext<TContext> {
-    readonly overallCachePolicy?: Required<CacheHint> | undefined;
+    // Not readonly: plugins can set it.
+    overallCachePolicy?: Required<CacheHint> | undefined;
   }
 }
 
@@ -57,6 +58,7 @@ export class CacheControlExtension<TContext = any>
   }
 
   private hints: Map<ResponsePath, CacheHint> = new Map();
+  private overallCachePolicyOverride?: Required<CacheHint>;
 
   willResolveField(
     _source: any,
@@ -165,7 +167,15 @@ export class CacheControlExtension<TContext = any>
     }
   }
 
+  public overrideOverallCachePolicy(overallCachePolicy: Required<CacheHint>) {
+    this.overallCachePolicyOverride = overallCachePolicy;
+  }
+
   computeOverallCachePolicy(): Required<CacheHint> | undefined {
+    if (this.overallCachePolicyOverride) {
+      return this.overallCachePolicyOverride;
+    }
+
     let lowestMaxAge: number | undefined = undefined;
     let scope: CacheScope = CacheScope.Public;
 

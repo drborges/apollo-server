@@ -14,6 +14,7 @@ import { CacheScope } from 'apollo-cache-control';
 // apollo-server-sha as its own tiny module? apollo-server-env seems bad because
 // that would add sha.js to unnecessary places, I think?
 import { createHash } from 'crypto';
+import { CacheHint } from 'apollo-server-core/dist/requestPipelineAPI';
 
 interface Options<TContext = Record<string, any>> {
   // Underlying cache used to save results. All writes will be under keys that
@@ -107,6 +108,12 @@ interface ContextualCacheKey {
   sessionId?: string | null;
 }
 
+interface CacheValue {
+  result: ExecutionResult;
+  cachePolicy: Required<CacheHint>;
+  cacheTime: number; // epoch millis, used to calculate Age header
+}
+
 type CacheKey = BaseCacheKey & ContextualCacheKey;
 
 function cacheKeyString(key: CacheKey) {
@@ -131,26 +138,7 @@ export default function plugin(
 
       let sessionId: string | null = null;
       let baseCacheKey: BaseCacheKey | null = null;
-
-      function cacheSetInBackground(
-        contextualCacheKeyFields: ContextualCacheKey,
-        response: ExecutionResult,
-        ttlSeconds: number,
-      ) {
-        const key = cacheKeyString({
-          ...baseCacheKey!,
-          ...contextualCacheKeyFields,
-        });
-        const value = JSON.stringify(response);
-        // Note that this function converts key and response to strings before
-        // doing anything asynchronous, so it can run in parallel with user code
-        // without worrying about anything being mutated out from under it.
-        //
-        // Also note that the test suite assumes that this asynchronous function
-        // still calls `cache.set` synchronously (ie, that it writes to
-        // InMemoryLRUCache synchronously).
-        cache.set(key, value, { ttl: ttlSeconds }).catch(console.warn);
-      }
+      let age: number | null = null;
 
       return {
         async executor(
@@ -172,12 +160,20 @@ export default function plugin(
               ...baseCacheKey!,
               ...contextualCacheKeyFields,
             });
-            const value = await cache.get(key);
-            if (value === undefined) {
+            const serializedValue = await cache.get(key);
+            if (serializedValue === undefined) {
               return null;
             }
+
+            const value: CacheValue = JSON.parse(serializedValue);
+            // Use cache policy from the cache (eg, to calculate HTTP response
+            // headers).
+            // XXX Another alternative would be to directly set the cache-control HTTP header
+            // here.
+            requestContext.overallCachePolicy = value.cachePolicy;
             requestContext.metrics!.responseCacheHit = true;
-            return JSON.parse(value);
+            age = Math.round((+new Date() - value.cacheTime) / 1000);
+            return value.result;
           }
 
           // Call hooks. Save values which will be used in XXX as well.
@@ -229,7 +225,11 @@ export default function plugin(
             return;
           }
           if (requestContext.metrics!.responseCacheHit) {
-            // Never write back to the cache what we just read from it.
+            // Never write back to the cache what we just read from it. But do set the Age header!
+            const http = requestContext.response.http;
+            if (http && age !== null) {
+              http.headers.set('age', age.toString());
+            }
             return;
           }
           if (
@@ -272,6 +272,31 @@ export default function plugin(
             );
           }
 
+          function cacheSetInBackground(
+            contextualCacheKeyFields: ContextualCacheKey,
+          ) {
+            const key = cacheKeyString({
+              ...baseCacheKey!,
+              ...contextualCacheKeyFields,
+            });
+            const value: CacheValue = {
+              result: executionResult,
+              cachePolicy: overallCachePolicy!,
+              cacheTime: +new Date(),
+            };
+            const serializedValue = JSON.stringify(value);
+            // Note that this function converts key and response to strings before
+            // doing anything asynchronous, so it can run in parallel with user code
+            // without worrying about anything being mutated out from under it.
+            //
+            // Also note that the test suite assumes that this asynchronous function
+            // still calls `cache.set` synchronously (ie, that it writes to
+            // InMemoryLRUCache synchronously).
+            cache
+              .set(key, serializedValue, { ttl: overallCachePolicy!.maxAge })
+              .catch(console.warn);
+          }
+
           const isPrivate = overallCachePolicy.scope === CacheScope.Private;
           if (isPrivate) {
             if (!options.sessionId) {
@@ -286,22 +311,17 @@ export default function plugin(
               // Private data shouldn't be cached for logged-out users.
               return;
             }
-            cacheSetInBackground(
-              { sessionId, sessionMode: SessionMode.Private },
-              executionResult,
-              overallCachePolicy.maxAge,
-            );
+            cacheSetInBackground({
+              sessionId,
+              sessionMode: SessionMode.Private,
+            });
           } else {
-            cacheSetInBackground(
-              {
-                sessionMode:
-                  sessionId === null
-                    ? SessionMode.NoSession
-                    : SessionMode.AuthenticatedPublic,
-              },
-              executionResult,
-              overallCachePolicy.maxAge,
-            );
+            cacheSetInBackground({
+              sessionMode:
+                sessionId === null
+                  ? SessionMode.NoSession
+                  : SessionMode.AuthenticatedPublic,
+            });
           }
         },
       };

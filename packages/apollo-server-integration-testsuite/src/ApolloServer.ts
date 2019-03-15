@@ -36,6 +36,7 @@ import {
   Config,
   ApolloServerBase,
 } from 'apollo-server-core';
+import { Headers } from 'apollo-server-env';
 import { GraphQLExtension, GraphQLResponse } from 'graphql-extensions';
 import { TracingFormat } from 'apollo-tracing';
 import ApolloServerPluginResponseCache from 'apollo-server-plugin-response-cache';
@@ -1418,6 +1419,15 @@ export function testApolloServer<AS extends ApolloServerBase>(
         });
 
         const apolloFetch = createApolloFetch({ uri });
+        // Make HTTP headers visible on the result next to 'data'.
+        apolloFetch.useAfter(({ response }, next) => {
+          response.parsed.httpHeaders = response.headers;
+          next();
+        });
+        // Use 'any' because we're sneaking httpHeaders onto response.parsed.
+        function httpHeader(result: any, header: string): string | null {
+          return (result.httpHeaders as Headers).get(header);
+        }
 
         let expectedResolverCalls = 0;
         const expectCacheHit = () =>
@@ -1430,25 +1440,57 @@ export function testApolloServer<AS extends ApolloServerBase>(
             query: `{ cachedField }`,
           });
           expect(result.data.cachedField).toBe('value');
+          return result;
         };
 
-        await fetch();
-        expectCacheMiss();
+        {
+          const result = await fetch();
+          expectCacheMiss();
+          expect(httpHeader(result, 'cache-control')).toBe(
+            'max-age=10, public',
+          );
+          expect(httpHeader(result, 'age')).toBe(null);
+        }
 
-        await fetch();
-        expectCacheHit();
+        {
+          const result = await fetch();
+          expectCacheHit();
+          expect(httpHeader(result, 'cache-control')).toBe(
+            'max-age=10, public',
+          );
+          expect(httpHeader(result, 'age')).toBe('0');
+        }
 
         advanceTimeBy(5 * 1000);
 
-        await fetch();
-        expectCacheHit();
+        {
+          const result = await fetch();
+          expectCacheHit();
+          expect(httpHeader(result, 'cache-control')).toBe(
+            'max-age=10, public',
+          );
+          expect(httpHeader(result, 'age')).toBe('5');
+        }
 
         advanceTimeBy(6 * 1000);
-        await fetch();
-        expectCacheMiss();
 
-        await fetch();
-        expectCacheHit();
+        {
+          const result = await fetch();
+          expectCacheMiss();
+          expect(httpHeader(result, 'cache-control')).toBe(
+            'max-age=10, public',
+          );
+          expect(httpHeader(result, 'age')).toBe(null);
+        }
+
+        {
+          const result = await fetch();
+          expectCacheHit();
+          expect(httpHeader(result, 'cache-control')).toBe(
+            'max-age=10, public',
+          );
+          expect(httpHeader(result, 'age')).toBe('0');
+        }
 
         // For now, caching is based on the original document text, not the AST,
         // so this should be a cache miss.
