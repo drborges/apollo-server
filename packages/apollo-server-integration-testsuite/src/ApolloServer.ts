@@ -1419,6 +1419,12 @@ export function testApolloServer<AS extends ApolloServerBase>(
 
         const apolloFetch = createApolloFetch({ uri });
 
+        let expectedResolverCalls = 0;
+        const expectCacheHit = () =>
+          expect(resolverCallCount).toBe(expectedResolverCalls);
+        const expectCacheMiss = () =>
+          expect(resolverCallCount).toBe(++expectedResolverCalls);
+
         const fetch = async () => {
           const result = await apolloFetch({
             query: `{ cachedField }`,
@@ -1427,34 +1433,36 @@ export function testApolloServer<AS extends ApolloServerBase>(
         };
 
         await fetch();
-        expect(resolverCallCount).toBe(1);
+        expectCacheMiss();
 
         await fetch();
-        expect(resolverCallCount).toBe(1);
+        expectCacheHit();
 
         advanceTimeBy(5 * 1000);
 
         await fetch();
-        expect(resolverCallCount).toBe(1);
+        expectCacheHit();
 
         advanceTimeBy(6 * 1000);
         await fetch();
-        expect(resolverCallCount).toBe(2);
+        expectCacheMiss();
 
         await fetch();
-        expect(resolverCallCount).toBe(2);
+        expectCacheHit();
 
+        // For now, caching is based on the original document text, not the AST,
+        // so this should be a cache miss.
         const textChangedASTUnchangedResult = await apolloFetch({
           query: `{       cachedField           }`,
         });
         expect(textChangedASTUnchangedResult.data.cachedField).toBe('value');
-        expect(resolverCallCount).toBe(2);
+        expectCacheMiss();
 
         const slightlyDifferentQueryResult = await apolloFetch({
           query: `{alias: cachedField}`,
         });
         expect(slightlyDifferentQueryResult.data.alias).toBe('value');
-        expect(resolverCallCount).toBe(3);
+        expectCacheMiss();
       });
     });
   });
